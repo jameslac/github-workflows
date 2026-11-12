@@ -1,0 +1,58 @@
+name: AI Holistic PR Review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: "Optional AI model override (defaults to vars.AI_REVIEW_MODEL or provider default)"
+        required: false
+        type: string
+      central_ref:
+        description: "Git ref of jameslac/github-workflows to fetch the reviewer script from"
+        required: false
+        type: string
+        default: "main"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-pr-review:
+    name: Holistic Repo & Diff Review
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Google GenAI SDK
+        run: pip install -U google-genai
+
+      - name: Fetch central AI PR reviewer script
+        env:
+          CENTRAL_REF: ${{ inputs.central_ref }}
+        run: |
+          rm -rf /tmp/github-workflows
+          git clone --depth 1 --branch "$CENTRAL_REF" https://github.com/jameslac/github-workflows.git /tmp/github-workflows
+
+      - name: Run Holistic AI PR Reviewer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_REVIEW_MODEL: ${{ inputs.model || vars.AI_REVIEW_MODEL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 /tmp/github-workflows/scripts/ai_pr_reviewer.py
