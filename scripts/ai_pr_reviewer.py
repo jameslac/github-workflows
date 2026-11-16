@@ -234,6 +234,7 @@ Respond ONLY with a valid JSON object matching this exact schema:
 {{
   "verdict": "APPROVE" | "COMMENT" | "NEEDS_ATTENTION",
   "headline": "One sentence overall takeaway.",
+  "pr_description": "Comprehensive, up-to-date Markdown summary of what has changed in this PR based on the full diff (bulleted list of concrete changes across files/modules, replacing any stale first-pass notes).",
   "holistic_impact": "Markdown bullet list explaining how this PR fits into and impacts the broader repo.",
   "strengths": ["Markdown bullet 1", "Markdown bullet 2"],
   "risks_and_suggestions": ["Markdown bullet 1 (or empty list if none)"],
@@ -489,6 +490,7 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
             "enum": ["APPROVE", "COMMENT", "NEEDS_ATTENTION"],
         },
         "headline": {"type": "string"},
+        "pr_description": {"type": "string"},
         "holistic_impact": {"type": "string"},
         "strengths": {
             "type": "array",
@@ -514,6 +516,7 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
     "required": [
         "verdict",
         "headline",
+        "pr_description",
         "holistic_impact",
         "strengths",
         "risks_and_suggestions",
@@ -584,6 +587,73 @@ def build_scale_meter_markdown(metrics: dict[str, int], config: dict[str, Any]) 
         f"**Est. Context Tokens**: `~{est_tokens:,} / {token_budget_limit:,}`\n"
     )
     return meter_md, is_near_limit
+
+
+def sync_pr_description(
+    repo: str,
+    pr_number: int,
+    github_token: str,
+    current_body: str,
+    pr_description: str,
+) -> None:
+    """Update the PR description so it stays aligned with the current cumulative diff."""
+    if not pr_description.strip():
+        return
+
+    start_marker = "<!-- AI-PR-SUMMARY:START -->"
+    end_marker = "<!-- AI-PR-SUMMARY:END -->"
+    synced_section = (
+        f"{start_marker}\n"
+        f"## 🔄 What Changed (Auto-Synced from Diff)\n"
+        f"{pr_description.strip()}\n"
+        f"{end_marker}"
+    )
+
+    body = current_body or ""
+    if start_marker in body and end_marker in body:
+        pattern = re.compile(
+            re.escape(start_marker) + r".*?" + re.escape(end_marker),
+            re.DOTALL,
+        )
+        new_body = pattern.sub(synced_section, body)
+    else:
+        # If the PR has a "What Changed" or "Summary of Changes" section from Trello Watcher, replace its content or prepend
+        summary_heading_re = re.compile(
+            r"(## (?:What Changed|Summary of Changes)[^\n]*\n)(.*?)(?=\n## |\Z)",
+            re.DOTALL,
+        )
+        if summary_heading_re.search(body):
+            new_body = summary_heading_re.sub(
+                rf"\1{start_marker}\n{pr_description.strip()}\n{end_marker}\n",
+                body,
+                count=1,
+            )
+        elif body.strip():
+            new_body = f"{synced_section}\n\n---\n\n{body.strip()}"
+        else:
+            new_body = synced_section
+
+    if new_body.strip() == body.strip():
+        return
+
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    payload = {"body": new_body}
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {github_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        },
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            print(f"Synced GitHub PR #{pr_number} description (HTTP {resp.status}).")
+    except Exception as exc:
+        print(f"WARNING: Failed to sync PR description: {exc}")
 
 
 def post_github_review(
@@ -684,6 +754,7 @@ def main() -> int:
 
     verdict = review_data.get("verdict", "COMMENT")
     headline = review_data.get("headline", "Holistic repository review completed.")
+    pr_description = review_data.get("pr_description", "")
     holistic_impact = review_data.get("holistic_impact", "")
     strengths = review_data.get("strengths", [])
     risks = review_data.get("risks_and_suggestions", [])
@@ -745,6 +816,13 @@ def main() -> int:
     full_body = "\n\n".join(sections)
 
     if repo and pr_number_str and github_token and head_sha:
+        sync_pr_description(
+            repo=repo,
+            pr_number=int(pr_number_str),
+            github_token=github_token,
+            current_body=pr_body,
+            pr_description=pr_description,
+        )
         post_github_review(
             repo=repo,
             pr_number=int(pr_number_str),
