@@ -1,0 +1,94 @@
+name: Cloudflare Worker Preview Cleanup
+
+on:
+  workflow_call:
+    inputs:
+      worker_name:
+        description: "Worker name to target (defaults to the `name` in the caller's wrangler config)"
+        required: false
+        type: string
+        default: ""
+      wrangler_version:
+        description: "Wrangler version used when the caller repo has no local wrangler install (needs >= 4.135.0)"
+        required: false
+        type: string
+        default: "latest"
+      node_version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "22"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup-preview:
+    name: Delete Worker Preview
+    # Caller triggers: pull_request [closed] and delete. Skips fork PRs and non-branch deletes.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'delete' && github.event.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cf-preview-cleanup-${{ github.repository }}-${{ github.event.pull_request.head.ref || github.event.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install dependencies (if the caller has a lockfile)
+        run: |
+          if [ -f package-lock.json ]; then npm ci; fi
+      - name: Delete Cloudflare Worker Preview
+        env:
+          BRANCH_NAME: ${{ github.event.pull_request.head.ref || github.event.ref }}
+          WORKER_NAME: ${{ inputs.worker_name }}
+          WRANGLER_VERSION: ${{ inputs.wrangler_version }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$BRANCH_NAME" ] || [ "$BRANCH_NAME" = "main" ] || [ "$BRANCH_NAME" = "master" ]; then
+            echo "Skipping preview cleanup for protected or empty branch: '$BRANCH_NAME'"
+            exit 0
+          fi
+
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::warning::Skipping Cloudflare preview cleanup: CLOUDFLARE_API_TOKEN and/or CLOUDFLARE_ACCOUNT_ID secrets are not configured."
+            exit 0
+          fi
+
+          if [ -x node_modules/.bin/wrangler ]; then
+            WRANGLER=(npx --no-install wrangler)
+          else
+            WRANGLER=(npx --yes "wrangler@${WRANGLER_VERSION}")
+          fi
+
+          ARGS=(preview delete --name "$BRANCH_NAME" --skip-confirmation)
+          if [ -n "$WORKER_NAME" ]; then
+            ARGS+=(--worker-name "$WORKER_NAME")
+          fi
+
+          set +e
+          OUTPUT=$("${WRANGLER[@]}" "${ARGS[@]}" 2>&1)
+          STATUS=$?
+          set -e
+
+          printf '%s\n' "$OUTPUT"
+
+          if [ "$STATUS" -eq 0 ]; then
+            exit 0
+          fi
+
+          if printf '%s\n' "$OUTPUT" | grep -qiE '\[code: 10025\]|preview.*(not found|does not exist)'; then
+            echo "Preview for branch '$BRANCH_NAME' was not found or already deleted; treating as clean."
+            exit 0
+          fi
+
+          exit "$STATUS"
