@@ -49,3 +49,37 @@ Zero config is required—the script automatically reads `AGENTS.md` and `docs/A
   "line_budget_limit": 80000
 }
 ```
+
+## ☁️ Cloudflare Worker Preview Cleanup (`cloudflare-preview-cleanup.yml`)
+
+Deletes the branch's Cloudflare **Worker Preview** (created by `wrangler preview`) when a PR is closed/merged or its branch is deleted. Idempotent: if the preview is already gone (e.g. both events fire), it succeeds. If the Cloudflare secrets are missing it warns and skips instead of failing.
+
+### Quick Setup in Any Repo
+
+1. Add `.github/workflows/cleanup-preview.yml`:
+
+```yaml
+name: Cleanup Cloudflare Preview
+
+on:
+  pull_request:
+    types: [closed]
+  delete:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    uses: jameslac/github-workflows/.github/workflows/cloudflare-preview-cleanup.yml@main
+    secrets: inherit
+    # with:
+    #   worker_name: my-worker      # default: `name` from the repo's wrangler config
+    #   wrangler_version: "latest"  # only used if the repo has no local wrangler (needs >= 4.135.0)
+```
+
+2. Add repository secrets (**Settings → Secrets and variables → Actions**):
+   - `CLOUDFLARE_API_TOKEN` — token with **Account → Workers Scripts → Edit** (e.g. the "Edit Cloudflare Workers" template)
+   - `CLOUDFLARE_ACCOUNT_ID`
+
+> `delete` events only fire for workflows on the default branch, so the caller workflow must be merged to `main` first.
