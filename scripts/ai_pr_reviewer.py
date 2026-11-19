@@ -525,7 +525,13 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
 }
 
 
-def call_gemini(api_key: str, model: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+def call_gemini(
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from google import genai
 
     client = genai.Client(api_key=api_key)
@@ -539,7 +545,7 @@ def call_gemini(api_key: str, model: str, system_prompt: str, user_prompt: str) 
                 response_format={
                     "type": "text",
                     "mime_type": "application/json",
-                    "schema": REVIEW_JSON_SCHEMA,
+                    "schema": schema or REVIEW_JSON_SCHEMA,
                 },
             )
             return extract_json_object(interaction.output_text or "{}")
