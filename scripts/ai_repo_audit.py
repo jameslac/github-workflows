@@ -4,7 +4,7 @@ Daily AI Repo Audit -> GitHub Issues.
 
 Runs once per day (scheduled in the caller repo). Makes ONE LLM call over the whole
 repository context, and files a GitHub issue for each concrete, fixable finding.
-Issues are labeled so a downstream automation (e.g. Trello/Antigravity) can pick them up.
+Issues are labeled so downstream issue-triage or agent automations can pick them up.
 
 Free-tier friendly:
 - One request per repo per day (vs. one per PR push).
