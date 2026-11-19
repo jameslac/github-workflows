@@ -61,10 +61,7 @@ DEFAULT_IGNORED_DIRS = {
     "venv",
 }
 
-DEFAULT_IGNORED_PATH_PREFIXES = (
-    "addons/godot_ai",
-    "addons/.godot_ai_update",
-)
+DEFAULT_IGNORED_PATH_PREFIXES: tuple[str, ...] = ()
 
 DEFAULT_IGNORED_FILES = {
     "package-lock.json",
@@ -222,7 +219,7 @@ Review the PR against:
 1. Project Architecture & Rules (`AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`, etc.):
    - Enforce all architectural boundaries, dependency rules, privacy/credential handling rules, coding conventions, and CI/validator expectations documented in the repository.
    - If `AGENTS.md` specifies rules for architecture changes (such as deciding whether a new GitHub check/validator is needed under `.github/workflows/`), verify compliance.
-   - In Godot repositories (`project.godot`), enforce modular scene/script boundaries (e.g., `minigames/<game_name>/` isolation vs `core/` and `shared/`), static typing in GDScript, and editor plugin hygiene (`addons/godot_ai` or `_mcp_game_helper` must never be committed).
+   - In Godot repositories (`project.godot`), enforce modular scene/script boundaries documented in the repo's `AGENTS.md`, static typing in GDScript, and editor/tooling plugin hygiene (temporary or local-only editor plugins should never be committed).
 2. Holistic Impact:
    - Explain how these changes fit into and impact existing modules, contracts, data models, APIs, UI components, workflows, or shared utilities across the repository.
 3. Bugs, Performance & Security/Vulnerabilities:
@@ -623,7 +620,7 @@ def sync_pr_description(
         )
         new_body = pattern.sub(synced_section, body)
     else:
-        # If the PR has a "What Changed" or "Summary of Changes" section from Trello Watcher, replace its content or prepend
+        # If the PR already has a "What Changed" or "Summary of Changes" section, replace its content or prepend
         summary_heading_re = re.compile(
             r"(## (?:What Changed|Summary of Changes)[^\n]*\n)(.*?)(?=\n## |\Z)",
             re.DOTALL,

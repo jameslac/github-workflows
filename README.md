@@ -45,6 +45,7 @@ Zero config is required—the script automatically reads `AGENTS.md` and `docs/A
   ],
   "ignored_dirs": ["generated"],
   "ignored_files": ["large-snapshot.json"],
+  "ignored_path_prefixes": ["addons/local_plugin"],
   "token_budget_limit": 80000,
   "line_budget_limit": 80000
 }
