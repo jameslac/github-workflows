@@ -50,6 +50,35 @@ Zero config is required—the script automatically reads `AGENTS.md` and `docs/A
 }
 ```
 
+## 🗓️ Daily AI Repo Audit → GitHub Issues (`ai-daily-audit.yml`)
+
+Free-tier-friendly alternative to per-PR reviews: **one LLM call per repo per day** reviews the whole repo and files a GitHub issue for each concrete, fixable finding (max 5/run, de-duplicated against existing open/closed issues, labeled `ai-audit` + `severity:*`). Each issue includes problem, affected files, suggested fix, and acceptance criteria so a downstream agent automation can pick it up.
+
+Add `.github/workflows/ai-daily-audit.yml` to a repo (and remove the per-PR `ai-review.yml` caller to stop burning quota):
+
+```yaml
+name: AI Daily Audit
+
+on:
+  schedule:
+    - cron: "17 9 * * *"   # daily; stagger the minute per repo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    uses: jameslac/github-workflows/.github/workflows/ai-daily-audit.yml@main
+    secrets: inherit
+    # with:
+    #   max_issues: 3
+    #   label: ai-audit
+```
+
+Uses `GEMINI_API_KEY` first (then Anthropic/OpenAI). Context is capped at ~200k tokens (`audit_token_budget` in `.ai-review.json`). Stagger cron minutes/hours across repos so they don't share the same RPM/TPM window.
+
 ## ☁️ Cloudflare Worker Preview Cleanup (`cloudflare-preview-cleanup.yml`)
 
 Deletes the branch's Cloudflare **Worker Preview** (created by `wrangler preview`) when a PR is closed/merged or its branch is deleted. Idempotent: if the preview is already gone (e.g. both events fire), it succeeds. If the Cloudflare secrets are missing it warns and skips instead of failing.
