@@ -53,7 +53,9 @@ Zero config is required—the script automatically reads `AGENTS.md` and `docs/A
 
 ## 🗓️ Daily AI Repo Audit → GitHub Issues (`ai-daily-audit.yml`)
 
-Free-tier-friendly alternative to per-PR reviews: **one LLM call per repo per day** reviews the whole repo and files a GitHub issue for each concrete, fixable finding (max 5/run, de-duplicated against existing open/closed issues, labeled `ai-audit` + `severity:*`). Each issue includes problem, affected files, suggested fix, and acceptance criteria so a downstream agent automation can pick it up.
+Free-tier-friendly alternative to per-PR reviews: **at most one LLM call per repo per day** files a GitHub issue for each concrete, fixable finding (max 5/run, de-duplicated against existing open/closed issues, labeled `ai-audit` + `severity:*`). Each issue includes problem, affected files, suggested fix, and acceptance criteria so a downstream agent automation can pick it up.
+
+- **Incremental by default**: The first run performs a full-repository baseline audit; subsequent runs cache the last successful commit SHA via `actions/cache` (including clean 0-issue runs, with filed issue markers as fallback) and send only the diff since the last successful run plus changed files and 1-hop related files. Days with no new code commits are skipped without calling an LLM.
 
 Add `.github/workflows/ai-daily-audit.yml` to a repo (and remove the per-PR `ai-review.yml` caller to stop burning quota):
 
@@ -62,7 +64,7 @@ name: AI Daily Audit
 
 on:
   schedule:
-    - cron: "17 9 * * *"   # daily; stagger the minute per repo
+    - cron: "17 10 * * *"   # 5:17 AM EST / 6:17 AM EDT (GitHub cron is UTC; stagger minutes per repo)
   workflow_dispatch:
 
 permissions:
@@ -76,9 +78,11 @@ jobs:
     # with:
     #   max_issues: 3
     #   label: ai-audit
+    #   full_audit: false
 ```
 
-Uses `GEMINI_API_KEY` first (then Anthropic/OpenAI). Context is capped at ~200k tokens (`audit_token_budget` in `.ai-review.json`). Stagger cron minutes/hours across repos so they don't share the same RPM/TPM window.
+- **Morning EST/EDT scheduling**: GitHub Actions `schedule` cron uses **UTC** (`10:xx UTC` = 5:xx AM EST / 6:xx AM EDT; `11:xx UTC` = 6:xx AM EST / 7:xx AM EDT). Allow ~15–45 minutes for GitHub Actions cron queue jitter and stagger minutes/hours across repos so they don't share the same RPM/TPM window.
+- **Provider & budgets**: Uses `GEMINI_API_KEY` first (then Anthropic/OpenAI). Incremental context is capped at ~80k tokens (`audit_incremental_token_budget` in `.ai-review.json`), and full baseline runs are capped at ~200k tokens (`audit_token_budget`). Pass `with: full_audit: true` (or `workflow_dispatch`) to force a full baseline audit.
 
 ## ☁️ Cloudflare Worker Preview Cleanup (`cloudflare-preview-cleanup.yml`)
 
