@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      full_audit:
+        description: "Force a full-repository baseline audit instead of an incremental diff audit"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -57,7 +62,16 @@ jobs:
           rm -rf /tmp/github-workflows
           git clone --depth 1 --branch "$CENTRAL_REF" https://github.com/jameslac/github-workflows.git /tmp/github-workflows
 
+      - name: Restore last audit state
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/ai-audit-state
+          key: ai-audit-state-${{ github.ref_name }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            ai-audit-state-${{ github.ref_name }}-
+
       - name: Run daily AI audit
+        id: audit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -67,4 +81,13 @@ jobs:
           AUDIT_LABEL: ${{ inputs.label }}
           AUDIT_MAX_ISSUES: ${{ inputs.max_issues }}
           AUDIT_FORCE: ${{ inputs.force && '1' || '' }}
+          AUDIT_FULL: ${{ inputs.full_audit && '1' || '' }}
+          AUDIT_STATE_FILE: ${{ runner.temp }}/ai-audit-state/state.json
         run: python3 /tmp/github-workflows/scripts/ai_repo_audit.py
+
+      - name: Save last audit state
+        if: success() && steps.audit.outputs.state_updated == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/ai-audit-state
+          key: ai-audit-state-${{ github.ref_name }}-${{ github.sha }}-${{ github.run_id }}
