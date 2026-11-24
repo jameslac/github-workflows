@@ -749,7 +749,7 @@ def render_issue_body(
     )
 
 
-TRANSIENT_MARKERS = ("429", "503", "rate limit", "high demand", "service_unavailable", "overloaded")
+TRANSIENT_MARKERS = ("429", "503", "rate limit", "high demand", "service_unavailable", "overloaded", "timed out")
 
 
 def is_transient_error(exc: BaseException) -> bool:
