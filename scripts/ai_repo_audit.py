@@ -21,6 +21,7 @@ Environment:
   AUDIT_LABEL (default: ai-audit), AUDIT_MAX_ISSUES (default: 5)
   AUDIT_FORCE (set to 1 to skip the already-audited-HEAD check)
   AUDIT_FULL (set to 1 to force a full-repository baseline audit)
+  AUDIT_FALLBACK_MODEL (optional Gemini model to try if the primary stays unavailable)
   AUDIT_CHUNK_DELAY (seconds to wait between chunked requests, default 65)
   AUDIT_STATE_FILE (path to cached JSON state file tracking last_audited_sha)
 """
@@ -748,6 +749,14 @@ def render_issue_body(
     )
 
 
+TRANSIENT_MARKERS = ("429", "503", "rate limit", "high demand", "service_unavailable", "overloaded")
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in TRANSIENT_MARKERS)
+
+
 def call_provider(system_prompt: str, user_prompt: str) -> tuple[dict[str, Any], str] | None:
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -757,7 +766,16 @@ def call_provider(system_prompt: str, user_prompt: str) -> tuple[dict[str, Any],
     # Prefer Gemini first here: the whole point is staying on its free tier.
     if gemini_key:
         model = custom_model or "gemini-3.8-flash"
-        return core.call_gemini(gemini_key, model, system_prompt, user_prompt, schema=AUDIT_SCHEMA), f"Gemini `{model}`"
+        fallback_model = os.environ.get("AUDIT_FALLBACK_MODEL", "").strip()
+        try:
+            data = core.call_gemini(gemini_key, model, system_prompt, user_prompt, schema=AUDIT_SCHEMA)
+            return data, f"Gemini `{model}`"
+        except Exception as exc:
+            if not fallback_model or fallback_model == model or not is_transient_error(exc):
+                raise
+            print(f"Primary model `{model}` unavailable ({exc}); trying fallback `{fallback_model}`...")
+            data = core.call_gemini(gemini_key, fallback_model, system_prompt, user_prompt, schema=AUDIT_SCHEMA)
+            return data, f"Gemini `{fallback_model}`"
     if anthropic_key:
         model = custom_model or "claude-sonnet-4-5"
         return core.call_anthropic(anthropic_key, model, system_prompt, user_prompt), f"Claude `{model}`"
@@ -910,6 +928,16 @@ def main() -> int:
         except urllib.error.HTTPError as exc:
             print(f"ERROR calling AI provider ({exc.code}): {exc.read().decode('utf-8', errors='ignore')}")
             return 1
+        except Exception as exc:
+            if not is_transient_error(exc):
+                raise
+            # Provider capacity/rate problem that outlasted retries. State is NOT advanced, so the
+            # next scheduled run retries; issues already filed are de-duplicated by fingerprint.
+            print(
+                f"::warning::AI provider unavailable after retries on part {idx}/{total_chunks}: {exc}. "
+                "Audit state not advanced; will retry on the next run."
+            )
+            return 0
         if result is None:
             return 0
         data, model_label = result
