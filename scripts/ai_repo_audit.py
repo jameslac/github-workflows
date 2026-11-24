@@ -21,6 +21,7 @@ Environment:
   AUDIT_LABEL (default: ai-audit), AUDIT_MAX_ISSUES (default: 5)
   AUDIT_FORCE (set to 1 to skip the already-audited-HEAD check)
   AUDIT_FULL (set to 1 to force a full-repository baseline audit)
+  AUDIT_CHUNK_DELAY (seconds to wait between chunked requests, default 65)
   AUDIT_STATE_FILE (path to cached JSON state file tracking last_audited_sha)
 """
 
@@ -32,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,8 +44,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_pr_reviewer as core  # noqa: E402
 
 DEFAULT_MAX_ISSUES = 5
-DEFAULT_AUDIT_TOKEN_BUDGET = 200_000  # keep under free-tier TPM (Gemini flash ~250k)
+# Conservative chars-per-token (code tokenizes at ~3 chars/token, so //4 undercounts).
+CHARS_PER_TOKEN = 3
+# Per-request budget (one chunk). Free-tier Gemini allows ~250k input tokens/minute,
+# so keep each request well below that to leave room for the system prompt and estimate error.
+DEFAULT_AUDIT_TOKEN_BUDGET = 100_000
 DEFAULT_INCREMENTAL_TOKEN_BUDGET = 80_000
+DEFAULT_CHUNK_DELAY_SECONDS = 65  # wait out the 1-minute TPM window between chunk requests
+DEFAULT_MAX_TOTAL_ISSUES = 10
 DEFAULT_MAX_RELATED_FILES = 25
 MAX_NEIGHBOR_FILE_BYTES = 100_000
 
@@ -487,7 +495,7 @@ def collect_incremental_context(
             total_code_bytes += size
             code_files.append((path, rel, rel_str, size))
 
-    full_repo_est_tokens = max(1, total_code_bytes // 4)
+    full_repo_est_tokens = max(1, total_code_bytes // CHARS_PER_TOKEN)
     changed_non_deleted = {
         path_str
         for status, path_str, _ in changes
@@ -536,7 +544,7 @@ def collect_incremental_context(
     neighbors.sort(key=lambda item: (item[0], item[1], item[2]))
     selected_neighbors = neighbors[:max_related]
 
-    budget_chars = max(4_000, budget_tokens * 4)
+    budget_chars = max(4_000, budget_tokens * CHARS_PER_TOKEN)
     sections: list[str] = [
         f"## Commits Since Last Successful Audit ({base_sha[:7]}..{head[:7]})\n{commit_log or '(no commit messages)'}",
         f"## Changed Files Summary\n{_format_changes_summary(changes)}",
@@ -594,12 +602,69 @@ def collect_incremental_context(
 
     context_blob = "\n\n".join(sections)
     stats = {
-        "est_tokens": max(1, len(context_blob) // 4),
+        "est_tokens": max(1, len(context_blob) // CHARS_PER_TOKEN),
         "full_repo_est_tokens": full_repo_est_tokens,
         "changed_files": included_changed,
         "related_files": included_related,
     }
     return context_blob, stats
+
+
+def collect_full_chunks(
+    repo_root: Path,
+    config: dict[str, Any],
+    budget_tokens: int,
+) -> list[str]:
+    """Split the full-repo baseline into context chunks that each fit the per-request budget.
+
+    Every chunk carries the (capped) file tree plus a group of whole files, so no file is
+    silently dropped when the repo exceeds a single request's budget.
+    """
+    ignored_dirs, ignored_files, ignored_prefixes, code_extensions = get_repo_filter_sets(config)
+    repo_files = sorted(
+        _list_non_ignored_repo_files(repo_root, ignored_dirs, ignored_files, ignored_prefixes),
+        key=lambda item: item[2],
+    )
+    budget_chars = max(8_000, budget_tokens * CHARS_PER_TOKEN)
+
+    tree_body = "\n".join(f"- {rel_str}" for _, _, rel_str in repo_files)
+    tree_cap = int(budget_chars * 0.15)
+    if len(tree_body) > tree_cap:
+        tree_body = tree_body[:tree_cap].rsplit("\n", 1)[0] + "\n... [tree truncated]"
+    tree_section = f"## Repository File Tree\n{tree_body}"
+    body_budget = max(2_000, budget_chars - len(tree_section) - 600)
+
+    blocks: list[str] = []
+    for path, rel, rel_str in repo_files:
+        if not is_code_file(rel, code_extensions):
+            continue
+        text = _read_display_text(path)
+        line_count = len(text.splitlines())
+        block = f"### File: `{rel_str}` ({line_count} lines)\n```\n{text}\n```"
+        if len(block) > body_budget:
+            excerpt = text[: body_budget - 300]
+            block = f"### File: `{rel_str}` ({line_count} lines, truncated)\n```\n{excerpt}\n... [file truncated]\n```"
+        blocks.append(block)
+
+    groups: list[list[str]] = []
+    current: list[str] = []
+    used = 0
+    for block in blocks:
+        if current and used + len(block) > body_budget:
+            groups.append(current)
+            current, used = [], 0
+        current.append(block)
+        used += len(block) + 2
+    if current:
+        groups.append(current)
+    if not groups:
+        return [tree_section]
+
+    total = len(groups)
+    return [
+        f"{tree_section}\n\n## Repository Source Files (part {i} of {total})\n\n" + "\n\n".join(group)
+        for i, group in enumerate(groups, start=1)
+    ]
 
 
 def build_audit_prompt(
@@ -782,6 +847,7 @@ def main() -> int:
         )
         mode_base_sha = last_sha
         context_heading = "# Incremental Changes & Related Context"
+        contexts = [context_blob]
     else:
         if full_audit:
             reason = "AUDIT_FULL=1 requested"
@@ -792,22 +858,14 @@ def main() -> int:
         else:
             reason = "no prior audit baseline found (first run)"
         print(f"Audit mode: full baseline ({reason}).")
-        context_blob, metrics = core.collect_repo_context(repo_root, config)
-        if metrics["est_tokens"] > full_budget:
-            print(f"WARNING: context ~{metrics['est_tokens']:,} tokens exceeds budget {full_budget:,}; truncating.")
-            context_blob = context_blob[: full_budget * 4]
-        else:
-            print(f"Full baseline context: ~{metrics['est_tokens']:,} tokens.")
+        contexts = collect_full_chunks(repo_root, config, full_budget)
+        est_total = sum(len(c) for c in contexts) // CHARS_PER_TOKEN
+        print(
+            f"Full baseline context: ~{est_total:,} tokens across {len(contexts)} request(s) "
+            f"(budget ~{full_budget:,} tokens each)."
+        )
         context_heading = "# Full Repository Context"
 
-    tracked_lines = [
-        f"- [{i['state']}] #{i['number']}: {i['title']}" for i in existing[:100]
-    ]
-    tracked = "\n".join(tracked_lines) or "(none)"
-    user_prompt = (
-        f"# Already Tracked (do not duplicate)\n{tracked}\n\n"
-        f"{context_heading}\n{context_blob}\n"
-    )
     system_prompt = build_audit_prompt(
         repo_root,
         repo,
@@ -816,44 +874,75 @@ def main() -> int:
         base_sha=mode_base_sha,
         head=head,
     )
+    chunk_delay = int(os.environ.get("AUDIT_CHUNK_DELAY", DEFAULT_CHUNK_DELAY_SECONDS))
+    max_total = int(config.get("audit_max_total_issues", DEFAULT_MAX_TOTAL_ISSUES))
 
-    try:
-        result = call_provider(system_prompt, user_prompt)
-    except urllib.error.HTTPError as exc:
-        print(f"ERROR calling AI provider ({exc.code}): {exc.read().decode('utf-8', errors='ignore')}")
-        return 1
-    if result is None:
-        return 0
-    data, model_label = result
-
-    print(f"Audit summary: {data.get('summary', '')}")
     known = {m.group(1) for i in existing if (m := FINGERPRINT_RE.search(i.get("body") or ""))}
     known_titles = {re.sub(r"\W+", " ", i["title"].lower()).strip() for i in existing}
+    tracked_lines = [f"- [{i['state']}] #{i['number']}: {i['title']}" for i in existing[:100]]
 
     ensure_label(repo, token, label)
     created = 0
-    for item in (data.get("issues") or [])[:max_issues]:
-        title = str(item.get("title", "")).strip()
-        if not title:
-            continue
-        fp = make_fingerprint(title, item.get("files", []))
-        if fp in known or re.sub(r"\W+", " ", title.lower()).strip() in known_titles:
-            print(f"Skip duplicate: {title}")
-            continue
-        labels = [label, f"severity:{item.get('severity', 'low')}"]
-        # severity label may not exist; GitHub auto-creates unknown labels on issue creation.
-        issue = gh_request(
-            "POST",
-            f"https://api.github.com/repos/{repo}/issues",
-            token,
-            {
-                "title": f"[AI Audit] {title}"[:250],
-                "body": render_issue_body(item, fp, head, model_label, base_sha=mode_base_sha),
-                "labels": labels,
-            },
+    total_chunks = len(contexts)
+    for idx, context_blob in enumerate(contexts, start=1):
+        if created >= max_total:
+            print(f"Reached max total issues ({max_total}); skipping remaining chunks.")
+            break
+        if idx > 1:
+            print(f"Waiting {chunk_delay}s to stay under the per-minute token limit...")
+            time.sleep(chunk_delay)
+
+        tracked = "\n".join(tracked_lines) or "(none)"
+        part_note = (
+            f"\nThis is part {idx} of {total_chunks} of the repository. The file tree lists all files, "
+            "but only report issues in files whose contents are included below.\n"
+            if total_chunks > 1
+            else ""
         )
-        created += 1
-        print(f"Created issue #{issue['number']}: {title}")
+        user_prompt = (
+            f"# Already Tracked (do not duplicate)\n{tracked}\n{part_note}\n"
+            f"{context_heading}\n{context_blob}\n"
+        )
+        print(f"Auditing part {idx}/{total_chunks} (~{len(user_prompt) // CHARS_PER_TOKEN:,} est. input tokens)...")
+
+        try:
+            result = call_provider(system_prompt, user_prompt)
+        except urllib.error.HTTPError as exc:
+            print(f"ERROR calling AI provider ({exc.code}): {exc.read().decode('utf-8', errors='ignore')}")
+            return 1
+        if result is None:
+            return 0
+        data, model_label = result
+        print(f"Audit summary (part {idx}/{total_chunks}): {data.get('summary', '')}")
+
+        for item in (data.get("issues") or [])[:max_issues]:
+            if created >= max_total:
+                break
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            norm_title = re.sub(r"\W+", " ", title.lower()).strip()
+            fp = make_fingerprint(title, item.get("files", []))
+            if fp in known or norm_title in known_titles:
+                print(f"Skip duplicate: {title}")
+                continue
+            labels = [label, f"severity:{item.get('severity', 'low')}"]
+            # severity label may not exist; GitHub auto-creates unknown labels on issue creation.
+            issue = gh_request(
+                "POST",
+                f"https://api.github.com/repos/{repo}/issues",
+                token,
+                {
+                    "title": f"[AI Audit] {title}"[:250],
+                    "body": render_issue_body(item, fp, head, model_label, base_sha=mode_base_sha),
+                    "labels": labels,
+                },
+            )
+            created += 1
+            known.add(fp)
+            known_titles.add(norm_title)
+            tracked_lines.append(f"- [open] #{issue['number']}: [AI Audit] {title}")
+            print(f"Created issue #{issue['number']}: {title}")
 
     if created == 0:
         print("No new issues filed.")

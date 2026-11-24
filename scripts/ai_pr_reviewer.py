@@ -533,6 +533,7 @@ def call_gemini(
 
     client = genai.Client(api_key=api_key)
     max_attempts = 4
+    rate_limit_retries = 0
     for attempt in range(1, max_attempts + 1):
         try:
             interaction = client.interactions.create(
@@ -548,13 +549,22 @@ def call_gemini(
             return extract_json_object(interaction.output_text or "{}")
         except Exception as exc:
             err_str = str(exc)
-            is_transient = any(
-                code in err_str
-                for code in ("503", "429", "high demand", "service_unavailable", "overloaded")
+            is_rate_limit = "429" in err_str or "rate limit" in err_str.lower()
+            is_transient = is_rate_limit or any(
+                code in err_str for code in ("503", "high demand", "service_unavailable", "overloaded")
             )
             if not is_transient or attempt == max_attempts:
                 raise
-            wait_s = 10 * attempt
+            if is_rate_limit:
+                # Per-minute token limits reset on a rolling 60s window; retrying sooner just
+                # re-spends the same tokens and fails again. Honor the server hint, minimum 65s.
+                hint = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+                wait_s = max(65, int(float(hint.group(1))) + 5) if hint else 65
+                if rate_limit_retries >= 1:
+                    raise
+                rate_limit_retries += 1
+            else:
+                wait_s = 10 * attempt
             print(
                 f"Gemini transient error (attempt {attempt}/{max_attempts}): {err_str}. "
                 f"Retrying in {wait_s}s..."
