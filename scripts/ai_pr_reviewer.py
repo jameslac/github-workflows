@@ -529,11 +529,11 @@ def call_gemini(
     system_prompt: str,
     user_prompt: str,
     schema: dict[str, Any] | None = None,
+    max_attempts: int = 5,
 ) -> dict[str, Any]:
     from google import genai
 
     client = genai.Client(api_key=api_key)
-    max_attempts = 5
     rate_limit_retries = 0
     request_timeout_s = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "240"))
     for attempt in range(1, max_attempts + 1):

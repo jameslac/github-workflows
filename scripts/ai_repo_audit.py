@@ -752,6 +752,9 @@ def render_issue_body(
 TRANSIENT_MARKERS = ("429", "503", "rate limit", "high demand", "service_unavailable", "overloaded", "timed out")
 
 
+_PRIMARY_UNAVAILABLE = False
+
+
 def is_transient_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return any(marker in msg for marker in TRANSIENT_MARKERS)
@@ -767,13 +770,31 @@ def call_provider(system_prompt: str, user_prompt: str) -> tuple[dict[str, Any],
     if gemini_key:
         model = custom_model or "gemini-3.8-flash"
         fallback_model = os.environ.get("AUDIT_FALLBACK_MODEL", "").strip()
+        has_fallback = bool(fallback_model) and fallback_model != model
+        global _PRIMARY_UNAVAILABLE
+        if has_fallback and _PRIMARY_UNAVAILABLE:
+            data = core.call_gemini(gemini_key, fallback_model, system_prompt, user_prompt, schema=AUDIT_SCHEMA)
+            return data, f"Gemini `{fallback_model}`"
         try:
-            data = core.call_gemini(gemini_key, model, system_prompt, user_prompt, schema=AUDIT_SCHEMA)
+            # With a fallback available, fail over fast: every failed attempt on the primary
+            # also burns one of its (small) daily request quota.
+            data = core.call_gemini(
+                gemini_key,
+                model,
+                system_prompt,
+                user_prompt,
+                schema=AUDIT_SCHEMA,
+                max_attempts=2 if has_fallback else 5,
+            )
             return data, f"Gemini `{model}`"
         except Exception as exc:
-            if not fallback_model or fallback_model == model or not is_transient_error(exc):
+            if not has_fallback or not is_transient_error(exc):
                 raise
-            print(f"Primary model `{model}` unavailable ({exc}); trying fallback `{fallback_model}`...")
+            _PRIMARY_UNAVAILABLE = True
+            print(
+                f"Primary model `{model}` unavailable ({exc}); using fallback `{fallback_model}` "
+                "for the rest of this run..."
+            )
             data = core.call_gemini(gemini_key, fallback_model, system_prompt, user_prompt, schema=AUDIT_SCHEMA)
             return data, f"Gemini `{fallback_model}`"
     if anthropic_key:
