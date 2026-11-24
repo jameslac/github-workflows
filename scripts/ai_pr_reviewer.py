@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -534,7 +535,17 @@ def call_gemini(
     client = genai.Client(api_key=api_key)
     max_attempts = 5
     rate_limit_retries = 0
+    request_timeout_s = int(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS", "240"))
     for attempt in range(1, max_attempts + 1):
+        # Hard wall-clock cap per request (SIGALRM, Linux/macOS main thread) so a hung
+        # connection can never stall the job indefinitely.
+        use_alarm = request_timeout_s > 0 and hasattr(signal, "SIGALRM")
+        if use_alarm:
+            def _on_timeout(signum: int, frame: Any) -> None:
+                raise TimeoutError(f"Gemini request timed out after {request_timeout_s}s")
+
+            signal.signal(signal.SIGALRM, _on_timeout)
+            signal.alarm(request_timeout_s)
         try:
             interaction = client.interactions.create(
                 model=model,
@@ -546,12 +557,16 @@ def call_gemini(
                     "schema": schema or REVIEW_JSON_SCHEMA,
                 },
             )
+            if use_alarm:
+                signal.alarm(0)
             return extract_json_object(interaction.output_text or "{}")
         except Exception as exc:
+            if use_alarm:
+                signal.alarm(0)
             err_str = str(exc)
             is_rate_limit = "429" in err_str or "rate limit" in err_str.lower()
             is_transient = is_rate_limit or any(
-                code in err_str for code in ("503", "high demand", "service_unavailable", "overloaded")
+                code in err_str for code in ("503", "high demand", "service_unavailable", "overloaded", "timed out")
             )
             if not is_transient or attempt == max_attempts:
                 raise
