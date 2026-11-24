@@ -532,7 +532,7 @@ def call_gemini(
     from google import genai
 
     client = genai.Client(api_key=api_key)
-    max_attempts = 4
+    max_attempts = 5
     rate_limit_retries = 0
     for attempt in range(1, max_attempts + 1):
         try:
@@ -564,7 +564,9 @@ def call_gemini(
                     raise
                 rate_limit_retries += 1
             else:
-                wait_s = 10 * attempt
+                # 503 "high demand" is capacity-side and often lasts minutes; failed attempts may
+                # also count toward per-minute token limits, so back off 30s/60s/90s/120s.
+                wait_s = 30 * attempt
             print(
                 f"Gemini transient error (attempt {attempt}/{max_attempts}): {err_str}. "
                 f"Retrying in {wait_s}s..."

@@ -82,6 +82,7 @@ jobs:
           AUDIT_MAX_ISSUES: ${{ inputs.max_issues }}
           AUDIT_FORCE: ${{ inputs.force && '1' || '' }}
           AUDIT_FULL: ${{ inputs.full_audit && '1' || '' }}
+          AUDIT_FALLBACK_MODEL: ${{ vars.AUDIT_FALLBACK_MODEL }}
           AUDIT_STATE_FILE: ${{ runner.temp }}/ai-audit-state/state.json
         run: python3 /tmp/github-workflows/scripts/ai_repo_audit.py
 
