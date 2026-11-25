@@ -84,6 +84,36 @@ jobs:
 - **Morning EST/EDT scheduling**: GitHub Actions `schedule` cron uses **UTC** (`10:xx UTC` = 5:xx AM EST / 6:xx AM EDT; `11:xx UTC` = 6:xx AM EST / 7:xx AM EDT). Allow ~15–45 minutes for GitHub Actions cron queue jitter and stagger minutes/hours across repos so they don't share the same RPM/TPM window.
 - **Provider & budgets**: Uses `GEMINI_API_KEY` first (then Anthropic/OpenAI). Incremental context is capped at ~80k tokens (`audit_incremental_token_budget` in `.ai-review.json`), and each full-baseline request is capped at ~100k tokens (`audit_token_budget`, estimated at ~3 chars/token). Larger repos are split into multiple chunked requests with a ~65s pause between them (`AUDIT_CHUNK_DELAY`) so per-minute free-tier token limits are never exceeded, with at most 10 issues filed per run (`audit_max_total_issues`). Gemini 429s are retried once after waiting out the rate-limit window; 503 "high demand" errors are retried up to 4 times with 30s/60s/90s/120s backoff. If the provider is still unavailable the run ends with a warning annotation (not a failure) and the audit state is not advanced, so the next run retries. Optionally set the repository variable `AUDIT_FALLBACK_MODEL` to a second Gemini model to try when the primary stays unavailable. Pass `with: full_audit: true` (or `workflow_dispatch`) to force a full baseline audit.
 
+## 🔗 PR Merged Sync (`pr-merged-sync.yml`)
+
+When a PR is merged: closes the issues it links (`Closes #123`), removes AI state labels (`ai-in-progress`, `ai-review`, `ai-fix` by default), and comments on them. If the PR title/body contains a Trello card URL (`https://trello.com/c/<id>`), it also moves that card to the list named `Done` (configurable) on the card's board. The Trello step is skipped unless the `TRELLO_API_KEY` and `TRELLO_TOKEN` secrets are set.
+
+```yaml
+name: PR Merged Sync
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  sync:
+    uses: jameslac/github-workflows/.github/workflows/pr-merged-sync.yml@main
+    secrets: inherit
+    # with:
+    #   trello_done_list: "Done"
+```
+
+> Uses the `pull_request` event (not `pull_request_target`), so fork PRs never get secrets. Trello credentials are sent in an `Authorization` header, not in URLs.
+
+## 🧰 Prompt: GitHub Issue → Antigravity Fix Watcher (`prompts/github-issue-watcher.md`)
+
+A paste-into-a-new-chat prompt that builds a generic, local issue watcher (the GitHub-issues counterpart of a Trello watcher). It automatically picks up open issues with a configured pick-up label (such as the ones the daily audit files, no manual labeling needed), launches an Antigravity conversation per issue, and opens a Draft PR that closes the issue. The prompt is repo-agnostic; the watcher it produces keeps its machine-specific config outside this public repo.
+
 ## ☁️ Cloudflare Worker Preview Cleanup (`cloudflare-preview-cleanup.yml`)
 
 Deletes the branch's Cloudflare **Worker Preview** (created by `wrangler preview`) when a PR is closed/merged or its branch is deleted. Idempotent: if the preview is already gone (e.g. both events fire), it succeeds. If the Cloudflare secrets are missing it warns and skips instead of failing.

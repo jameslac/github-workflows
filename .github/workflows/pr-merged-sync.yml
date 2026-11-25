@@ -1,0 +1,58 @@
+name: PR Merged Sync
+
+# Reusable workflow: when a PR is merged, close its linked issues (and clean up AI state labels)
+# and, if the PR links a Trello card, move that card to the "done" list.
+
+on:
+  workflow_call:
+    inputs:
+      central_ref:
+        description: "Git ref of jameslac/github-workflows to fetch the script from"
+        required: false
+        type: string
+        default: "main"
+      cleanup_labels:
+        description: "Comma-separated labels to remove from issues closed by the PR"
+        required: false
+        type: string
+        default: "ai-in-progress,ai-review,ai-fix"
+      trello_done_list:
+        description: "Name of the Trello list to move linked cards to"
+        required: false
+        type: string
+        default: "Done"
+    secrets:
+      TRELLO_API_KEY:
+        required: false
+      TRELLO_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  sync:
+    name: Close linked issues / move Trello card
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch central sync script
+        env:
+          CENTRAL_REF: ${{ inputs.central_ref }}
+        run: |
+          rm -rf /tmp/github-workflows
+          git clone --depth 1 --branch "$CENTRAL_REF" https://github.com/jameslac/github-workflows.git /tmp/github-workflows
+
+      - name: Run PR merged sync
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CLEANUP_LABELS: ${{ inputs.cleanup_labels }}
+          TRELLO_DONE_LIST: ${{ inputs.trello_done_list }}
+          TRELLO_API_KEY: ${{ secrets.TRELLO_API_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          PYTHONUNBUFFERED: "1"
+        run: python3 /tmp/github-workflows/scripts/pr_merged_sync.py
